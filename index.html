@@ -52,8 +52,6 @@ function create()
 
     castle.add(castlePlatform);
 
-    castlePlatform.body.setBounce(1.2);
-
     // Player 1 (green)
     player1 = this.add.rectangle(260, 100, 60, 60, 0x00ff00).setStrokeStyle(3, 0x000000);
     this.physics.add.existing(player1);
