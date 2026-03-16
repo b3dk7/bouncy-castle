@@ -10,10 +10,13 @@
 
 <script>
 
+const W = 1200;
+const H = 600;
+
 const config = {
     type: Phaser.AUTO,
-    width: 800,
-    height: 600,
+    width: W,
+    height: H,
     backgroundColor: '#87CEEB',
     physics: {
         default: 'arcade',
@@ -29,101 +32,222 @@ const config = {
     }
 };
 
-let player1;
-let player2;
-let castle;
+let player1, player2, castle, acid;
+let cursors, wasd;
+let gameOver = false;
+let scene;
+let wins1 = 0, wins2 = 0;
+let scoreText;
+let overlayElements = [];
 
-let cursors;
-let wasd;
+const YELLOW = 0xffdd00;
+const RED    = 0xdd0000;
+const BORDER = 0x880000;
+
+function drawVerticalSegments(g, x, y, w, h, segH)
+{
+    const count = Math.ceil(h / segH);
+    const r = 8;
+    for (let i = 0; i < count; i++) {
+        const sy = y + i * segH;
+        const sh = Math.min(segH, y + h - sy);
+        if (sh <= 0) break;
+        g.fillStyle(i % 2 === 0 ? YELLOW : RED);
+        g.fillRoundedRect(x, sy, w, sh, r);
+        g.lineStyle(2, BORDER);
+        g.strokeRoundedRect(x, sy, w, sh, r);
+    }
+}
+
+function drawHorizontalSegments(g, x, y, w, h, segW)
+{
+    const count = Math.ceil(w / segW);
+    const r = 8;
+    for (let i = 0; i < count; i++) {
+        const sx = x + i * segW;
+        const sw = Math.min(segW, x + w - sx);
+        if (sw <= 0) break;
+        g.fillStyle(i % 2 === 0 ? YELLOW : RED);
+        g.fillRoundedRect(sx, y, sw, h, r);
+        g.lineStyle(2, BORDER);
+        g.strokeRoundedRect(sx, y, sw, h, r);
+    }
+}
 
 const game = new Phaser.Game(config);
 
-function preload()
-{
-}
+function preload() {}
 
 function create()
 {
-    // Bouncy castle platform
+    scene = this;
+
+    this.physics.world.setBoundsCollision(false, false, false, false);
+
+    // === SPIKES (top) ===
+    const spikeGraphics = this.add.graphics();
+    spikeGraphics.fillStyle(0x444444);
+    const spikeCount = 38;
+    const spikeW = W / spikeCount;
+    const spikeH = 28;
+    for (let i = 0; i < spikeCount; i++) {
+        spikeGraphics.fillTriangle(
+            i * spikeW,          0,
+            (i + 0.5) * spikeW,  spikeH,
+            (i + 1) * spikeW,    0
+        );
+    }
+    const spikeZone = this.add.rectangle(W / 2, 14, W, 28, 0x000000, 0);
+    this.physics.add.existing(spikeZone, true);
+
+    // === ACID (bottom) ===
+    acid = this.add.rectangle(W / 2, 585, W, 30, 0x00cc00).setStrokeStyle(2, 0x005500);
+    this.physics.add.existing(acid, true);
+
+    // === BOUNCY SIDE WALLS ===
+    const padLeft  = this.add.rectangle(18, 300, 36, 540, 0x000000, 0);
+    this.physics.add.existing(padLeft, true);
+    const padRight = this.add.rectangle(W - 18, 300, 36, 540, 0x000000, 0);
+    this.physics.add.existing(padRight, true);
+
+    const wallGfx = this.add.graphics();
+    drawVerticalSegments(wallGfx,      0, 28, 36, 542, 36);
+    drawVerticalSegments(wallGfx, W - 36, 28, 36, 542, 36);
+
+    // === CASTLE (floor only, no turrets) ===
     castle = this.physics.add.staticGroup();
-
-    const castlePlatform = this.add.rectangle(400, 550, 600, 60, 0xff69b4).setStrokeStyle(4, 0x000000);
+    const castlePlatform = this.add.rectangle(W / 2, 540, 300, 60, 0x000000, 0);
     this.physics.add.existing(castlePlatform, true);
-
     castle.add(castlePlatform);
 
-    // Player 1 (green)
-    player1 = this.add.rectangle(260, 100, 60, 60, 0x00ff00).setStrokeStyle(3, 0x000000);
+    const castleGfx = this.add.graphics();
+    drawHorizontalSegments(castleGfx, W / 2 - 150, 510, 300, 60, 50);
+
+    scoreText = this.add.text(W / 2, 543, '0 - 0', {
+        font: 'bold 22px Arial',
+        fill: '#ffffff',
+        stroke: '#000000',
+        strokeThickness: 3
+    }).setOrigin(0.5).setDepth(1);
+
+    // === PLAYERS ===
+    player1 = this.add.rectangle(450, 200, 60, 60, 0x00ff00).setStrokeStyle(3, 0x000000);
     this.physics.add.existing(player1);
     player1.body.setBounce(1);
-    player1.body.setCollideWorldBounds(true);
 
-    // Player 2 (red)
-    player2 = this.add.rectangle(540, 100, 60, 60, 0xff0000).setStrokeStyle(3, 0x000000);
+    player2 = this.add.rectangle(750, 200, 60, 60, 0xff0000).setStrokeStyle(3, 0x000000);
     this.physics.add.existing(player2);
     player2.body.setBounce(1);
-    player2.body.setCollideWorldBounds(true);
 
-    // Collisions
+    // === COLLISIONS ===
     this.physics.add.collider(player1, castle);
     this.physics.add.collider(player2, castle);
+    this.physics.add.collider(player1, player2);
 
-    // Controls
+    this.physics.add.collider(player1, padLeft);
+    this.physics.add.collider(player1, padRight);
+    this.physics.add.collider(player2, padLeft);
+    this.physics.add.collider(player2, padRight);
+
+    // Death zones
+    this.physics.add.overlap(player1, spikeZone, () => endGame(1));
+    this.physics.add.overlap(player2, spikeZone, () => endGame(2));
+    this.physics.add.overlap(player1, acid,      () => endGame(1));
+    this.physics.add.overlap(player2, acid,      () => endGame(2));
+
+    // === CONTROLS ===
     cursors = this.input.keyboard.createCursorKeys();
-
     wasd = this.input.keyboard.addKeys({
-        up: Phaser.Input.Keyboard.KeyCodes.W,
-        left: Phaser.Input.Keyboard.KeyCodes.A,
-        right: Phaser.Input.Keyboard.KeyCodes.D
+        up:    Phaser.Input.Keyboard.KeyCodes.W,
+        left:  Phaser.Input.Keyboard.KeyCodes.A,
+        right: Phaser.Input.Keyboard.KeyCodes.D,
+        down:  Phaser.Input.Keyboard.KeyCodes.S
     });
 
-    // Instructions
     this.add.text(10, 10, 'WASD = Player 1 (green)   •   Arrow keys = Player 2 (red)', {
-        font: '18px Arial',
-        fill: '#000'
+        font: '16px Arial', fill: '#000'
     });
+}
+
+function endGame(loser)
+{
+    if (gameOver) return;
+    gameOver = true;
+
+    if (loser === 1) wins2++; else wins1++;
+    scoreText.setText(wins1 + ' - ' + wins2);
+
+    player1.body.setVelocity(0, 0);
+    player2.body.setVelocity(0, 0);
+    player1.body.setGravityY(-800);
+    player2.body.setGravityY(-800);
+
+    const winnerName = loser === 1 ? 'Player 2 (Red)' : 'Player 1 (Green)';
+
+    const bg           = scene.add.rectangle(W / 2, 280, 420, 160, 0x000000, 0.75).setDepth(10);
+    const winText      = scene.add.text(W / 2, 240, winnerName + ' Wins!', {
+        font: 'bold 30px Arial', fill: '#ffffff'
+    }).setOrigin(0.5).setDepth(11);
+    const scoreDisplay = scene.add.text(W / 2, 282, 'Score  ' + wins1 + ' - ' + wins2, {
+        font: '22px Arial', fill: '#aaffaa'
+    }).setOrigin(0.5).setDepth(11);
+    const btn          = scene.add.text(W / 2, 324, '[ NEXT ROUND ]', {
+        font: 'bold 22px Arial', fill: '#ffff00',
+        backgroundColor: '#333300', padding: { x: 12, y: 6 }
+    }).setOrigin(0.5).setDepth(11).setInteractive({ useHandCursor: true });
+
+    btn.on('pointerover', () => btn.setStyle({ fill: '#ffffff' }));
+    btn.on('pointerout',  () => btn.setStyle({ fill: '#ffff00' }));
+    btn.on('pointerdown', nextRound);
+
+    overlayElements = [bg, winText, scoreDisplay, btn];
+}
+
+function nextRound()
+{
+    overlayElements.forEach(el => el.destroy());
+    overlayElements = [];
+
+    player1.setPosition(450, 200);
+    player1.body.setVelocity(0, 0);
+    player1.body.setGravityY(0);
+
+    player2.setPosition(750, 200);
+    player2.body.setVelocity(0, 0);
+    player2.body.setGravityY(0);
+
+    gameOver = false;
 }
 
 function update()
 {
+    if (gameOver) return;
 
-    // Player 1 movement (WASD)
+    // Player 1 (WASD)
     if (wasd.left.isDown)
-    {
-        player1.body.setVelocityX(-200);
-    }
+        player1.body.setVelocityX(-400);
     else if (wasd.right.isDown)
-    {
-        player1.body.setVelocityX(200);
-    }
-    else
-    {
-        player1.body.setVelocityX(0);
-    }
+        player1.body.setVelocityX(400);
 
     if (wasd.up.isDown && player1.body.touching.down)
-    {
         player1.body.setVelocityY(-400);
-    }
+    else if (wasd.up.isDown && !player1.body.touching.down && player1.body.velocity.y > 0)
+        player1.body.setVelocityY(80);
+    else if (Phaser.Input.Keyboard.JustDown(wasd.down) && !player1.body.touching.down)
+        player1.body.setVelocityY(600);
 
-    // Player 2 movement (Arrow keys)
+    // Player 2 (Arrow keys)
     if (cursors.left.isDown)
-    {
-        player2.body.setVelocityX(-200);
-    }
+        player2.body.setVelocityX(-400);
     else if (cursors.right.isDown)
-    {
-        player2.body.setVelocityX(200);
-    }
-    else
-    {
-        player2.body.setVelocityX(0);
-    }
+        player2.body.setVelocityX(400);
 
     if (cursors.up.isDown && player2.body.touching.down)
-    {
         player2.body.setVelocityY(-400);
-    }
+    else if (cursors.up.isDown && !player2.body.touching.down && player2.body.velocity.y > 0)
+        player2.body.setVelocityY(80);
+    else if (Phaser.Input.Keyboard.JustDown(cursors.down) && !player2.body.touching.down)
+        player2.body.setVelocityY(600);
 }
 
 </script>
