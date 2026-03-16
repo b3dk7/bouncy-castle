@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <title>Bouncy Castle</title>
+<script src="https://unpkg.com/colyseus.js@0.15.29/dist/colyseus.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/phaser@3.90.0/dist/phaser.js"></script>
 </head>
 
@@ -12,19 +13,13 @@
 
 const W = 1200;
 const H = 600;
+const PLAYER_HALF = 30; // half of 60px — converts server top-left coords to Phaser center
 
 const config = {
     type: Phaser.AUTO,
     width: W,
     height: H,
     backgroundColor: '#87CEEB',
-    physics: {
-        default: 'arcade',
-        arcade: {
-            gravity: { y: 800 },
-            debug: false
-        }
-    },
     scene: {
         preload: preload,
         create: create,
@@ -32,20 +27,28 @@ const config = {
     }
 };
 
-let player1, player2, castle, acid;
+// --- Colyseus ---
+const colyseusClient = new Colyseus.Client('ws://localhost:2567');
+let room         = null;
+let myPlayerIndex = null;
+
+// --- Game state ---
+let player1, player2;
 let cursors, wasd;
-let gameOver = false;
+let gameOver    = false;
 let scene;
-let wins1 = 0, wins2 = 0;
 let scoreText;
 let overlayElements = [];
+let waitingText     = null;
+let downJustPressed = false;
+let frameSeq        = 0;
 
+// --- Visuals ---
 const YELLOW = 0xffdd00;
 const RED    = 0xdd0000;
 const BORDER = 0x880000;
 
-function drawVerticalSegments(g, x, y, w, h, segH)
-{
+function drawVerticalSegments(g, x, y, w, h, segH) {
     const count = Math.ceil(h / segH);
     const r = 8;
     for (let i = 0; i < count; i++) {
@@ -59,8 +62,7 @@ function drawVerticalSegments(g, x, y, w, h, segH)
     }
 }
 
-function drawHorizontalSegments(g, x, y, w, h, segW)
-{
+function drawHorizontalSegments(g, x, y, w, h, segW) {
     const count = Math.ceil(w / segW);
     const r = 8;
     for (let i = 0; i < count; i++) {
@@ -78,11 +80,8 @@ const game = new Phaser.Game(config);
 
 function preload() {}
 
-function create()
-{
+function create() {
     scene = this;
-
-    this.physics.world.setBoundsCollision(false, false, false, false);
 
     // === SPIKES (top) ===
     const spikeGraphics = this.add.graphics();
@@ -92,34 +91,21 @@ function create()
     const spikeH = 28;
     for (let i = 0; i < spikeCount; i++) {
         spikeGraphics.fillTriangle(
-            i * spikeW,          0,
-            (i + 0.5) * spikeW,  spikeH,
-            (i + 1) * spikeW,    0
+            i * spikeW,         0,
+            (i + 0.5) * spikeW, spikeH,
+            (i + 1) * spikeW,   0
         );
     }
-    const spikeZone = this.add.rectangle(W / 2, 14, W, 28, 0x000000, 0);
-    this.physics.add.existing(spikeZone, true);
 
     // === ACID (bottom) ===
-    acid = this.add.rectangle(W / 2, 585, W, 30, 0x00cc00).setStrokeStyle(2, 0x005500);
-    this.physics.add.existing(acid, true);
+    this.add.rectangle(W / 2, 585, W, 30, 0x00cc00).setStrokeStyle(2, 0x005500);
 
     // === BOUNCY SIDE WALLS ===
-    const padLeft  = this.add.rectangle(18, 300, 36, 540, 0x000000, 0);
-    this.physics.add.existing(padLeft, true);
-    const padRight = this.add.rectangle(W - 18, 300, 36, 540, 0x000000, 0);
-    this.physics.add.existing(padRight, true);
-
     const wallGfx = this.add.graphics();
     drawVerticalSegments(wallGfx,      0, 28, 36, 542, 36);
     drawVerticalSegments(wallGfx, W - 36, 28, 36, 542, 36);
 
-    // === CASTLE (floor only, no turrets) ===
-    castle = this.physics.add.staticGroup();
-    const castlePlatform = this.add.rectangle(W / 2, 540, 300, 60, 0x000000, 0);
-    this.physics.add.existing(castlePlatform, true);
-    castle.add(castlePlatform);
-
+    // === CASTLE ===
     const castleGfx = this.add.graphics();
     drawHorizontalSegments(castleGfx, W / 2 - 150, 510, 300, 60, 50);
 
@@ -130,30 +116,9 @@ function create()
         strokeThickness: 3
     }).setOrigin(0.5).setDepth(1);
 
-    // === PLAYERS ===
-    player1 = this.add.rectangle(450, 200, 60, 60, 0x00ff00).setStrokeStyle(3, 0x000000);
-    this.physics.add.existing(player1);
-    player1.body.setBounce(1);
-
-    player2 = this.add.rectangle(750, 200, 60, 60, 0xff0000).setStrokeStyle(3, 0x000000);
-    this.physics.add.existing(player2);
-    player2.body.setBounce(1);
-
-    // === COLLISIONS ===
-    this.physics.add.collider(player1, castle);
-    this.physics.add.collider(player2, castle);
-    this.physics.add.collider(player1, player2);
-
-    this.physics.add.collider(player1, padLeft);
-    this.physics.add.collider(player1, padRight);
-    this.physics.add.collider(player2, padLeft);
-    this.physics.add.collider(player2, padRight);
-
-    // Death zones
-    this.physics.add.overlap(player1, spikeZone, () => endGame(1));
-    this.physics.add.overlap(player2, spikeZone, () => endGame(2));
-    this.physics.add.overlap(player1, acid,      () => endGame(1));
-    this.physics.add.overlap(player2, acid,      () => endGame(2));
+    // === PLAYERS (visual only — no physics) ===
+    player1 = this.add.rectangle(480, 230, 60, 60, 0x00ff00).setStrokeStyle(3, 0x000000);
+    player2 = this.add.rectangle(780, 230, 60, 60, 0xff0000).setStrokeStyle(3, 0x000000);
 
     // === CONTROLS ===
     cursors = this.input.keyboard.createCursorKeys();
@@ -164,28 +129,65 @@ function create()
         down:  Phaser.Input.Keyboard.KeyCodes.S
     });
 
-    this.add.text(10, 10, 'WASD = Player 1 (green)   •   Arrow keys = Player 2 (red)', {
-        font: '16px Arial', fill: '#000'
-    });
+    // Track fast-fall as a one-shot flag
+    this.input.keyboard.on('keydown-S',     () => { if (!gameOver) downJustPressed = true; });
+    this.input.keyboard.on('keydown-DOWN',  () => { if (!gameOver) downJustPressed = true; });
+
+    // === CONNECT TO SERVER ===
+    connectToServer();
 }
 
-function endGame(loser)
-{
-    if (gameOver) return;
-    gameOver = true;
+async function connectToServer() {
+    waitingText = scene.add.text(W / 2, H / 2, 'Connecting...', {
+        font: 'bold 28px Arial', fill: '#000000'
+    }).setOrigin(0.5).setDepth(20);
 
-    if (loser === 1) wins2++; else wins1++;
-    scoreText.setText(wins1 + ' - ' + wins2);
+    try {
+        room = await colyseusClient.joinOrCreate('bouncy_castle');
 
-    player1.body.setVelocity(0, 0);
-    player2.body.setVelocity(0, 0);
-    player1.body.setGravityY(-800);
-    player2.body.setGravityY(-800);
+        waitingText.setText('Waiting for opponent...');
 
-    const winnerName = loser === 1 ? 'Player 2 (Red)' : 'Player 1 (Green)';
+        room.onMessage('PLAYER_ASSIGNED', ({ index }) => {
+            myPlayerIndex = index;
+            const controls = index === 1 ? 'You are Player 1 (green) — WASD' : 'You are Player 2 (red) — Arrow keys';
+            scene.add.text(10, 10, controls, { font: '16px Arial', fill: '#000' });
+        });
+
+        room.onMessage('ROUND_START', () => {
+            if (waitingText) { waitingText.destroy(); waitingText = null; }
+            clearOverlay();
+            gameOver = false;
+        });
+
+        room.onMessage('ROUND_OVER', ({ winner, wins1, wins2 }) => {
+            gameOver = true;
+            scoreText.setText(wins1 + ' - ' + wins2);
+            showRoundOver(winner, wins1, wins2);
+        });
+
+        // Bind to player state changes — update visual positions
+        room.state.players.onAdd((playerState) => {
+            playerState.onChange(() => {
+                const sprite = playerState.playerIndex === 1 ? player1 : player2;
+                sprite.setPosition(
+                    playerState.x + PLAYER_HALF,
+                    playerState.y + PLAYER_HALF
+                );
+            });
+        });
+
+    } catch (e) {
+        if (waitingText) waitingText.setText('Could not connect to server.');
+        console.error(e);
+    }
+}
+
+function showRoundOver(winner, wins1, wins2) {
+    const winnerName = winner === 1 ? 'Player 1 (Green)' : winner === 2 ? 'Player 2 (Red)' : 'Draw!';
+    const title      = winner === 0 ? 'Draw!' : winnerName + ' Wins!';
 
     const bg           = scene.add.rectangle(W / 2, 280, 420, 160, 0x000000, 0.75).setDepth(10);
-    const winText      = scene.add.text(W / 2, 240, winnerName + ' Wins!', {
+    const winText      = scene.add.text(W / 2, 240, title, {
         font: 'bold 30px Arial', fill: '#ffffff'
     }).setOrigin(0.5).setDepth(11);
     const scoreDisplay = scene.add.text(W / 2, 282, 'Score  ' + wins1 + ' - ' + wins2, {
@@ -198,56 +200,33 @@ function endGame(loser)
 
     btn.on('pointerover', () => btn.setStyle({ fill: '#ffffff' }));
     btn.on('pointerout',  () => btn.setStyle({ fill: '#ffff00' }));
-    btn.on('pointerdown', nextRound);
+    btn.on('pointerdown', () => { if (room) room.send('NEXT_ROUND', {}); });
 
     overlayElements = [bg, winText, scoreDisplay, btn];
 }
 
-function nextRound()
-{
+function clearOverlay() {
     overlayElements.forEach(el => el.destroy());
     overlayElements = [];
-
-    player1.setPosition(450, 200);
-    player1.body.setVelocity(0, 0);
-    player1.body.setGravityY(0);
-
-    player2.setPosition(750, 200);
-    player2.body.setVelocity(0, 0);
-    player2.body.setGravityY(0);
-
-    gameOver = false;
 }
 
-function update()
-{
-    if (gameOver) return;
+function update() {
+    if (!room || myPlayerIndex === null || gameOver) return;
 
-    // Player 1 (WASD)
-    if (wasd.left.isDown)
-        player1.body.setVelocityX(-400);
-    else if (wasd.right.isDown)
-        player1.body.setVelocityX(400);
+    const isP1 = myPlayerIndex === 1;
+    const leftKey  = isP1 ? wasd.left    : cursors.left;
+    const rightKey = isP1 ? wasd.right   : cursors.right;
+    const upKey    = isP1 ? wasd.up      : cursors.up;
 
-    if (wasd.up.isDown && player1.body.touching.down)
-        player1.body.setVelocityY(-400);
-    else if (wasd.up.isDown && !player1.body.touching.down && player1.body.velocity.y > 0)
-        player1.body.setVelocityY(80);
-    else if (Phaser.Input.Keyboard.JustDown(wasd.down) && !player1.body.touching.down)
-        player1.body.setVelocityY(600);
+    room.send('INPUT', {
+        left:            leftKey.isDown,
+        right:           rightKey.isDown,
+        up:              upKey.isDown,
+        downJustPressed: downJustPressed,
+        seq:             frameSeq++
+    });
 
-    // Player 2 (Arrow keys)
-    if (cursors.left.isDown)
-        player2.body.setVelocityX(-400);
-    else if (cursors.right.isDown)
-        player2.body.setVelocityX(400);
-
-    if (cursors.up.isDown && player2.body.touching.down)
-        player2.body.setVelocityY(-400);
-    else if (cursors.up.isDown && !player2.body.touching.down && player2.body.velocity.y > 0)
-        player2.body.setVelocityY(80);
-    else if (Phaser.Input.Keyboard.JustDown(cursors.down) && !player2.body.touching.down)
-        player2.body.setVelocityY(600);
+    downJustPressed = false;
 }
 
 </script>
